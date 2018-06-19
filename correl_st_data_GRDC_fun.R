@@ -1,0 +1,309 @@
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#			functions to read data 
+# definitions imply format-specific assumptions  
+#
+# TODO: change names & edit descriptions
+#
+# read reference info 
+# (that's a table with a header and "" sep)
+ReadRefInfo <- function(dir_name, file_name) {
+	ref_info_file_name <- paste0(dir_name, file_name)
+	res_df <- read.csv(ref_info_file_name, stringsAsFactors = FALSE, sep = "")
+	return(res_df)
+}
+# @ref_df is the data frame as returned by ReadRefInfo()
+# !!! special structure of the data is kept in mind (groupped by 10 days)
+ReadRefData <- function(dir_name, info_df, i_ref_st) {
+
+	data_df <- read.csv(paste0(dir_name, info_df$name[i_ref_st], ".csv"),
+		skip = 1, stringsAsFactors = FALSE, sep = ";")
+	data_df <- data_df[, 1:(1 + 3 * 12)]
+	colnames(data_df) <- c("year", sapply(
+		function(i) {paste("month", i, 1:3, sep = "_")}, X = 1:12
+		)
+	)
+	data_df <- data_df[!is.na(data_df$year), ]
+	data_df$annual <- sapply(function(i) {mean(as.numeric(data_df[i, -1]))}, 
+		X = seq_along(data_df$year))
+	data_df <- data_df %>% mutate(ann_normal = (annual - mean(annual)) /mean(annual))
+
+	return(data_df)
+}
+
+# read atm indices in KNMI format (https://climexp.knmi.nl/selectindex.cgi?id=someone@somewhere)
+ReadInd <- function(dir_name, file_name, n_skip) {	
+	res_df <- read.table(paste0(dir_name, file_name), 
+							stringsAsFactors = FALSE, header = FALSE,
+							skip = n_skip, na.strings = "-999.9000")
+	colnames(res_df) <- c("year", paste("month", 1:12, sep = "_"))
+	res_df[which(res_df < -900)] <- NA
+	res_df$annual <- rowSums(res_df[, -1])
+	return(res_df)
+}	
+#
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# @info_df has structure as returned by ReadRefInfo()
+# @rad_infl radius of influence, degrees
+SelectInAreaInfo <- function(dir_name = dd_name, file_name = df_name,
+	info_df, rad_infl, st_name, n_avbl_years) {
+	st_info_file_name <- paste0(dir_name, file_name)
+	# read data of GRDC stations
+	st_info <- read.csv(st_info_file_name, stringsAsFactors = FALSE, sep =";", quote="", 
+		header = TRUE, row.names = NULL)
+
+	i_ref_st <- which(info_df$name %in% st_name)
+	if (length(i_ref_st) < 1) {stop(cat
+		("No such station in the reference info: ",
+			"\n\r", "given station name:", st_name, 
+		"\n\r", sep = "")
+		)
+	}
+
+	st_info$distance <- sqrt((info_df$Lat[i_ref_st] - st_info$lat)^2 +
+		(info_df$Lon[i_ref_st] - st_info$lon)^2)
+
+	st_in_area_info <- st_info %>% filter (m_yrs > n_avbl_years) %>%
+		filter(distance < rad_infl)	
+
+	if (length(st_in_area_info[, 1]) < 1) {stop(cat("No stations into the area",
+		" with a given number of observation years", "\n\r", "Reference station ", 
+		info_df$name[i_ref_st], "\b\r",
+		"rad_infl = ", rad_infl, " , n_avbl_years = ", n_avbl_years, "\n\r",
+		sep = ""))}
+
+	return(st_in_area_info)
+}
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#		functions to work with hydrologic basins
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# @dir_name is the name of the data dir (with a shape-file)
+# @file_name is the name of the data file (the shape-file, actually)
+ReadBasin <- function(dir_name, file_name){
+	map_res <- readOGR(paste0(sh_dir_name, sh_fl_name))	
+	return(map_res)
+}
+
+# map_obj is the geo-object representing he basin
+# @x and @y are the coordinates of the spatial points under consideration
+InBasinCheck <- function (map_obj, x, y){
+
+	# SpatialPoints() isn't happy with vectors -> matrix or data frame is needed
+	test_point <- SpatialPoints(coords = cbind(x, y), 
+		proj4string = CRS(proj4string(map_obj)))
+	res <- sapply(FUN = function(i) gContains(map_Volga, test_point[i]), 
+		X = seq_along(test_point))
+
+	if (sum(res) < 1) {stop(cat("No stations into the basin",
+		" with a given number of observation years",
+		sep = ""))}
+
+	return(res)
+}
+
+# plots a series of the points that may be in basin or may be not
+# plots interactively; it seems, ggplot2 is a better way to store plot objs
+# @x and @y are the coordinates of the spatial points under consideration
+InBasinPlot <- function(map_obj, x, y){
+
+	test_point <- SpatialPoints(coords = cbind(x, y), 
+		proj4string = CRS(proj4string(map_obj)))
+	inside_test <- sapply(FUN = function(i) gContains(map_Volga, test_point[i]), 
+		X = seq_along(test_point))
+
+	for (i in seq_along(test_point)) {
+		# wrapper for the name of the plot
+		plot_name <- paste0("Point ", i)
+		dev.new()
+		if (inside_test[i]) {
+			plot(map_obj, col = "gray", b = "gray30", main = plot_name)
+			points(test_point[i], pch = 21, col = "darkgreen", bg = "green")		
+		} else {
+			plot(map_obj, col = "gray", b = "gray30", main = plot_name)
+			points(test_point[i], pch = 21, col = "darkred", bg = "red")
+		}
+	}
+}
+
+# plots conseuqently the reference point (in blue) and the cloud of points around them
+# the around points may be in (in green) or out (in red) of the basin
+# plots interactively; it seems, ggplot2 is a better way to store plot objs
+# @map_obj is an geo-object representing the considered basin
+# @x and @y are the coordinates of the spatial points under consideration
+RelToBasinPlot <- function(map_obj, x_ref, y_ref,
+	x, y, ref_name = "", sub_text = ""){
+
+	ref_point <- SpatialPoints(coords = cbind(x_ref, y_ref), 
+		proj4string = CRS(proj4string(map_obj)))	
+
+	test_points <- SpatialPoints(coords = cbind(x, y), 
+		proj4string = CRS(proj4string(map_obj)))
+
+	inside_test <- sapply(FUN = function(i) gContains(map_Volga, test_points[i]), 
+		X = seq_along(test_points))
+	
+	plot(map_obj, col = "gray", b = "gray30", main = ref_name, 
+		sub = sub_text, cex.sub = 0.5)
+	points(ref_point, pch = 21, col = "royalblue", bg = "darkblue")	
+	for (i in seq_along(test_points)) {
+		# wrapper for the name of the plot
+		if (inside_test[i]) {
+			points(test_points[i], pch = 21, col = "darkgreen", bg = "green")		
+		} else {
+			points(test_points[i], pch = 21, col = "darkred", bg = "red")
+		}
+	}
+}	
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# @i_obs_st is an index of the observation station to compare with the reference station
+ExtractObsData <- function(dir_name, info_df, i_obs_st) {
+
+	# data-specific consts
+	dd_name_pref <- c("europe//", "asia//")
+	dd_cont_code <- c(6, 2)
+	df_name_pref <- "_Q_YVM"
+	# 4-digit year; one or more whitespaces digits (possibly with a point inside); end of input which may ve precede with whitespaces
+	match_pattern <- "^\\d\\d\\d\\d;[[:space:]]+\\d*\\.*\\d*;[[:space:]]*\\z"
+
+	contin_code <- substr(info_df$grdc_no[i_obs_st], 
+		start = 1, stop = 1)
+	prefx <- dd_name_pref[which(dd_cont_code %in% contin_code)]
+
+	file_to_read <- paste0(dir_name, prefx, info_df$grdc_no[i_obs_st], 
+		df_name_pref, ".csv")	
+
+	test_con <- file(file_to_read, "r", blocking = FALSE)
+	test_data_file <- readLines(con = test_con, n = 1000)
+	close(test_con)
+	unlink(test_con)
+
+	ann_ts_data_text <- test_data_file[str_detect(test_data_file, match_pattern)]
+	data_ann <- read.table(text = ann_ts_data_text, sep = ";", 
+		stringsAsFactors = FALSE, na.strings = -999.000)
+
+	data_ann <- data_ann[, -3] # last NA column appears due to ; before the end of the input
+	colnames(data_ann) <- c("year", "MQ") # for consistency with GRDC 2013
+	data_ann <- data_ann %>% mutate(MQ_norm = (MQ - mean(MQ))/mean(MQ))
+
+	return(data_ann)
+}
+
+# @yrs_vct is a vector of observed years
+# @yrs_to_match is a vector of years in reference data
+# range(obs_data[[i]]$year
+AllYearsCheck <- function(yrs_vct, yrs_to_match){
+	# there is no problem if all years present
+	super_cond <- (range(yrs_vct)[2] - range(yrs_vct)[1]) == (length(yrs_vct) - 1)
+	if (super_cond) {
+		return(yrs_vct)
+	} else {
+		cmmn_years <- dplyr::intersect(yrs_vct, yrs_to_match)
+		yrs_diff_sqv <- yrs_vct[-length(yrs_vct)] - stats::lag(yrs_vct, 1)[-1]
+		# as the simplest solution just cut all years before the last lost one
+		i_last_lost <- max(which(yrs_diff_sqv < -1))
+		return(yrs_vct[-seq(from = 1, to = i_last_lost, by = 1)])
+	}
+}
+
+SmoothObsData <- function(data_df, col_name, n_ma = 11){
+
+	dat <- data_df[, col_name]
+	ma_col_name <- paste(col_name, 11, "ma", sep = "_")
+
+	fn <- rep(1/n_ma, n_ma)
+	# result of filter is of the ts type -> force to numerical
+	data_df[, ma_col_name] <- as.numeric(stats::filter(dat, fn, sides = 1))
+
+	return(data_df)
+}
+
+# @year_min_for_annot is the xmin to ajust text across the plot field
+PlotTimeSerCompar <- function(ref_df, obs_list, 
+	ref_col_name = "ann_normal",
+	obs_col_name = "MQ_norm",
+	plot_name = "", sub_name = "",
+	annot_text = "",
+	year_min_for_annot = 1850){
+
+	dark_col <- c(ref = "darkred", obs = "darkgreen")
+	line_col <- c(ref = "red", obs = "forestgreen")
+	fill_col <- c(ref = "coral", obs = "green")
+
+	# delete rows with NAs for smoothed values
+	ref_df_end <- ref_df[!is.na(ref_df[, ref_col_name]), ]
+
+	plot_res <- ggplot(data = ref_df_end, aes_string(
+			x = "year", y = ref_col_name)) +
+		geom_line(col = line_col["ref"]) + 
+		geom_point(shape = 21, fill = fill_col["ref"], colour = dark_col["ref"]) +
+		labs(ggtitle(label = plot_name, subtitle = sub_name))
+
+		alpha_seq <- seq(from = 0.25, to = 0.75, length.out = length(obs_list))	
+	for (i in seq_along(obs_list)) {
+
+		obs_dat <- obs_list[[i]][!is.na(obs_list[[i]][, obs_col_name]), ]
+		# return(obs_dat)
+
+		plot_res <- plot_res +
+			geom_line(inherit.aes = FALSE, data = obs_dat,
+				aes_string(x = "year", y = obs_col_name), colour = line_col["obs"],
+				alpha = alpha_seq[i]) +
+			geom_point(inherit.aes = FALSE, data = obs_dat,
+				aes_string(x = "year", y = obs_col_name),
+				shape = 21, fill = fill_col["obs"], colour = dark_col["obs"]) 
+	}
+
+	plot_res <- plot_res +
+			annotate(geom = "text", xmin = year_min_for_annot - 20, x = year_min_for_annot, 
+				y = 0.5, label = annot_text, size = 2.5) +
+			theme(plot.subtitle = element_text(size = 5, face="italic", color = "gray10"))
+
+	return(plot_res)
+}
+
+# TODO How to set discrete color scales?
+PlotTimeSerCompar_AdvCol <- function(ref_df, obs_list, plot_name = "",
+	sub_name = ""){
+
+	dark_col <- c(ref = "darkred", obs = "darkgreen")
+	line_col <- c(ref = "red", obs = "forestgreen")
+	fill_col <- c(ref = "coral", obs = "green")
+
+	colour_count <- length(obs_list)
+	getPalette <- colorRampPalette(brewer.pal(9, "Set1"))
+
+	plot_res <- ggplot(data = ref_df, aes(x = year, y = ann_normal)) +
+		geom_line(col = line_col["ref"]) + 
+		geom_point(shape = 21, fill = fill_col["ref"], colour = dark_col["ref"]) +
+		labs(ggtitle(label = plot_name, subtitle = sub_name))
+
+	for (i in seq_along(obs_list)) {
+		alpha_seq <- seq(from = 0.25, to = 0.75, length.out = length(obs_list))	
+		plot_res <- plot_res +
+			geom_line(inherit.aes = FALSE, data = obs_list[[i]],
+				aes(x = year, y = MQ_norm),
+				alpha = alpha_seq[i], col = getPalette(i)) +
+			scale_colour_manual(values = c(getPalette)) +
+			geom_point(inherit.aes = FALSE, data = obs_list[[i]],
+				aes(x = year, y = MQ_norm),
+				shape = 21, fill = getPalette(i)) +
+			theme(legend.position="right")
+	}
+
+	return(plot_res)
+}
+
+Correl <- function(ref_df, obs_df) {	
+	years_for_cor <- dplyr::intersect(ref_df[, "year"], obs_df[, "year"])
+	Q_ref <- ref_df[which(ref_df[, "year"] %in% years_for_cor), "ann_normal"]
+	Q_data <- obs_df[which(obs_df[, "year"] %in% years_for_cor), "MQ_norm"]
+	# return(list(Qr = Q_ref, Q_d = Q_data))
+	if (length(Q_ref) == 0| length(Q_data) == 0) {
+		stop(paste0("Not enough data for correlation", "\n\r"))
+	}
+	return(list(correl_value = cor(Q_ref, Q_data), 
+				n_years = length(years_for_cor)))
+}
