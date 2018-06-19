@@ -1,2 +1,2 @@
 # MeteoCheck
-Set of function to read, check and transform meteorological data
+Set of functions to read, check and transform meteorological data
