@@ -1,3 +1,7 @@
+#
+#		would it be better to load libraries here
+#					or in the "_run"-file?
+#
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #			functions to read data 
 # definitions imply format-specific assumptions  
@@ -11,6 +15,108 @@ ReadRefInfo <- function(dir_name, file_name) {
 	res_df <- read.csv(ref_info_file_name, stringsAsFactors = FALSE, sep = "")
 	return(res_df)
 }
+
+# read monthly-aggregated data from Obninsk archive
+ReadObninsk <- function(dir_name, file_name) {
+
+	ref_info_file_name <- paste0(dir_name, file_name)
+	res_df <- read.csv(ref_info_file_name, stringsAsFactors = FALSE,
+		sep = "", header = FALSE)
+	colnames(res_df) <- c("st_id", "year", paste("month", 1:12, sep = "_"))
+
+	res_df$annual <- rowMeans(res_df[, -c(1, 2)])
+
+	return(res_df)
+}
+
+# read corrected presipitation data from Obninsk archive
+ReadObninskCorrtdPrecip <- function(dir_name, file_name) {
+
+	ref_info_file_name <- paste0(dir_name, file_name)
+	res_df <- read.csv(ref_info_file_name, stringsAsFactors = FALSE,
+		sep = ";", header = FALSE, na.strings = "9999.9")
+	colnames(res_df) <- c("st_id", "year", 
+		"month", "fullness_flag",
+		"raw_sum", "crrtd_sum", "crrtd_fluid", "crrtd_solid",
+		"crrtd_mix")
+
+	# res_df$annual <- rowMeans(res_df[, -c(1, 2)])
+
+	return(res_df)
+}
+
+# @geo_string_vct is a vector of characters formatted like "62ТА 01?"
+# @sep_mark_1, @sep_mark_2, @tail_mark are special symbols
+# causing troubles by transforming @geo_string_vct to numeric
+ExtractRoshydromCoord <- function(geo_string_vct,
+	sep_mark_1, sep_mark_2, tail_mark)
+{
+	temp_lat_string <- unlist(strsplit(
+		geo_string_vct,
+		# regular expression with "[", "]" and fixed = FALSE  
+		split = paste0("[", sep_mark_1, sep_mark_2, "|", 
+			sep_mark_2, sep_mark_1, "]")
+			)
+		)
+	temp_lat_string_2 <- unlist(strsplit(temp_lat_string, split = tail_mark,
+			fixed = TRUE))
+	str_vct_temp <- gsub(" ", "", temp_lat_string_2, fixed = TRUE)
+	# odd elements are degrees, even ones are minutes
+	return(as.numeric(str_vct_temp[seq(from = 1, to = length(str_vct_temp), by = 2)]) +
+	as.numeric(str_vct_temp[seq(from = 2, to = length(str_vct_temp), by = 2)])/60)
+}
+
+# read Roshydromet meta-data
+ExtractRoshydromMetaData <- function(dir_name, file_name) {
+
+	meta_df <- read.csv2(paste0(dir_name, file_name), 
+		header = FALSE, skip = 3,
+		dec = ".", stringsAsFactors = FALSE)
+	meta_df <- meta_df[, -1]
+	names(meta_df) <- c("st_id", "st_name", "lat", "lon",
+		"alt", "obs_begin", "comment")
+
+	meta_df <- meta_df %>% filter(!is.na(meta_df$st_id))
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	#					transform degrees to decimals
+	#	the problem is specific symbols inside the coordinates' strings
+
+	# extract specific symbols from strings of meta-information
+	# !!! TODO: is data-specific as far
+	smbl_splt <- c(rawToChar(charToRaw(meta_df[1, ]$lat)[3]),
+		rawToChar(charToRaw(meta_df[1, ]$lat)[4]),
+		rawToChar(charToRaw(meta_df[1, ]$lat)[7]))
+
+	# meta_df$lat_dec
+	meta_df$lat_dec <- sapply(
+		FUN = function(i) {
+			ExtractRoshydromCoord(geo_string_vct = meta_df[i, ]$lat,
+				sep_mark_1 = smbl_splt[1], sep_mark_2 = smbl_splt[2], 
+				tail_mark = smbl_splt[3])
+		}, X = seq_along(meta_df$lat)
+	)
+
+	meta_df$lon_dec <- sapply(
+		FUN = function(i) {
+			ExtractRoshydromCoord(geo_string_vct = meta_df[i, ]$lon,
+				sep_mark_1 = smbl_splt[1], sep_mark_2 = smbl_splt[2], 
+				tail_mark = smbl_splt[3])
+		}, X = seq_along(meta_df$lon)
+	) 
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	return(meta_df)
+}
+
+# TODO: pass a column name for calculations -> lazyeval:: could be helpful
+AddAnnAv <- function(meteo_df){
+
+	test_ann <- meteo_df %>% group_by(st_id, year) %>%
+		summarise(annual = mean(crrtd_sum))
+
+}
+
 # @ref_df is the data frame as returned by ReadRefInfo()
 # !!! special structure of the data is kept in mind (groupped by 10 days)
 ReadRefData <- function(dir_name, info_df, i_ref_st) {
@@ -49,8 +155,8 @@ SelectInAreaInfo <- function(dir_name = dd_name, file_name = df_name,
 	info_df, rad_infl, st_name, n_avbl_years) {
 	st_info_file_name <- paste0(dir_name, file_name)
 	# read data of GRDC stations
-	st_info <- read.csv(st_info_file_name, stringsAsFactors = FALSE, sep =";", quote="", 
-		header = TRUE, row.names = NULL)
+	st_info <- read.csv(st_info_file_name, stringsAsFactors = FALSE, sep =";",
+		quote="", header = TRUE, row.names = NULL)
 
 	i_ref_st <- which(info_df$name %in% st_name)
 	if (length(i_ref_st) < 1) {stop(cat
@@ -73,6 +179,32 @@ SelectInAreaInfo <- function(dir_name = dd_name, file_name = df_name,
 		sep = ""))}
 
 	return(st_in_area_info)
+}
+
+# @ meteo_df is the data frame with the "annual" column
+# and the "st_id" column
+LastMissed <- function(meteo_df) {
+
+	res <- meteo_df %>% filter(year < 2016) %>%
+		group_by(st_id) %>%
+		summarise(
+			last_missed_ind = last(which(is.na(annual))),
+			last_missed_year = year[last(which(is.na(annual)))]
+		) 
+
+	return(res)	
+}
+
+ExtractSt <- function(meteo_df, station_id){
+
+	missed_df <- LastMissed(meteo_df) %>%
+		filter(st_id %in% station_id)
+	# return(missed_df)	
+
+	res <- meteo_df %>% filter(st_id %in% station_id) %>%
+		filter(year > missed_df$last_missed_year)
+
+	return(res)
 }
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -180,7 +312,8 @@ ExtractObsData <- function(dir_name, info_df, i_obs_st) {
 	close(test_con)
 	unlink(test_con)
 
-	ann_ts_data_text <- test_data_file[str_detect(test_data_file, match_pattern)]
+	ann_ts_data_text <- test_data_file[str_detect(test_data_file, 
+		match_pattern)]
 	data_ann <- read.table(text = ann_ts_data_text, sep = ";", 
 		stringsAsFactors = FALSE, na.strings = -999.000)
 
