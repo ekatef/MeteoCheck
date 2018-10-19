@@ -2,12 +2,71 @@
 #		would it be better to load libraries here
 #					or in the "_run"-file?
 #
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#			functions to read data 
-# definitions imply format-specific assumptions  
-#
-# TODO: change names & edit descriptions
-#
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#			functions to read meteorological data 
+#				of a number popular sources
+# some of them (Roshydromet-Obnins archive, e.g.) require registration;
+# that is why data are supposed to be stored on a local server before to be processed
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+#********************************************
+# designed to read and transform KNMI-Climate Explorer data
+ReadInd <- function(dir_name, file_name) {	
+	read_df <- read.table(file.path(dir_name, file_name), 
+							stringsAsFactors = FALSE, header = FALSE,
+							na.strings = "NA",
+							comment.char = "#")
+
+	if (ncol(read_df) == 2) {
+		res_df <- TrsfIndLng(df_inp = read_df)
+	} else {
+		 res_df <- TrsfIndWd(df_inp = read_df)
+	}
+
+	return(res_df)
+}	
+
+# transform long-formatted monthly data to wide format
+TrsfIndLng <- function(df_inp) {	
+
+	colnames(df_inp) <- c("year", "dat")
+	df_inp[df_inp < -900] <- NA 	# -999.9 may mean NA, too!
+
+	months_names <- paste("month", 1:12, sep = "_")
+
+	# month may be coded as a fraction part of a year
+	# check-up of triviality https://stackoverflow.com/a/45273181/8465924
+	if (all(round(df_inp$year) == df_inp$year)){ # all years are integers
+		years_set <- unique(df_inp$year)
+		months_col <- rep(months_names, times = length(years_set))
+	} else { 									# non-trivial case: years have a fractional part
+		month_ns <- round((df_inp$year %% 1) * 12, 1)
+		if (any(month_ns < 1)) {
+			month_ns <- month_ns + 1
+		}
+		months_col <- paste("month", month_ns, sep = "_")
+		df_inp <- df_inp %>% mutate(year = floor(year))
+	}
+	df_inp <- cbind(df_inp, month_name = months_col)
+
+	df_inp <- spread(data = df_inp, key = month_name, value = dat)
+	df_inp <- df_inp %>% select_(.dots = c("year", months_names))
+
+	return(df_inp)
+}
+
+# add colnames and calculate ann-av of the wide-formatted data
+TrsfIndWd <- function(df_inp) {	
+	colnames(df_inp) <- c("year", paste("month", 1:12, sep = "_"))
+	df_inp[df_inp < -900] <- NA 	# -999.9 may mean NA, too!
+	df_inp$annual <- rowSums(df_inp[, -1])
+	return(df_inp)
+}
+#********************************************
+
+#********************************************
+#	work with Obninsk-Roshydromet data	
+
 # read reference info 
 # (that's a table with a header and "" sep)
 ReadRefInfo <- function(dir_name, file_name) {
@@ -24,7 +83,7 @@ ReadObninsk <- function(dir_name, file_name) {
 		sep = "", header = FALSE)
 	colnames(res_df) <- c("st_id", "year", paste("month", 1:12, sep = "_"))
 
-	res_df$annual <- rowMeans(res_df[, -c(1, 2)])
+	res_df$annual <- rowSums(res_df[, -c(1, 2)])
 
 	return(res_df)
 }
@@ -40,7 +99,7 @@ ReadObninskCorrtdPrecip <- function(dir_name, file_name) {
 		"raw_sum", "crrtd_sum", "crrtd_fluid", "crrtd_solid",
 		"crrtd_mix")
 
-	# res_df$annual <- rowMeans(res_df[, -c(1, 2)])
+	# res_df$annual <- rowSums(res_df[, -c(1, 2)])
 
 	return(res_df)
 }
@@ -113,8 +172,43 @@ ExtractRoshydromMetaData <- function(dir_name, file_name) {
 AddAnnAv <- function(meteo_df){
 
 	test_ann <- meteo_df %>% group_by(st_id, year) %>%
-		summarise(annual = mean(crrtd_sum))
+		summarise(annual = sum(crrtd_sum))
 
+}
+#********************************************
+
+# quick abd dirty approach for geo-clustering
+TransfCoordToRegion <- function(lat, lon) {
+	if ((lat > 50) & (lon < 55)) {return("Center")}
+	if ((lat < 50) & (lon < 60)) {return("South")}
+	if ((lat < 65) & ((lon > 60) & (lon < 90))) {
+		return("West Siberia")
+	}
+	if ((lat < 65) & ((lon > 90) & (lon < 130))) {
+		return("Soth East Siberia")
+	}
+	if ((lat < 55) & (lon > 130)) {
+		return("Soth Far East")
+	}
+	if ((lat > 55) & (lon > 130)) {
+		return("Northern Far East")
+	} 
+	else {return(NA)}
+}
+
+# vectorised quick abd dirty approach for geo-clustering
+# @meteo_df should have columns lat_dec & lon_dec
+TransfCoordToRegion_Vct <- function(meteo_df) {
+	res_df <- 	meteo_df %>% mutate(region = case_when(
+				((lat_dec > 50) & (lon_dec < 55))~ "Center",
+				((lat_dec < 50) & (lon_dec < 60))~ "South",	
+				((lat_dec < 65) & ((lon_dec > 60) & (lon_dec < 90))) ~ "West Siberia",			
+				((lat_dec < 65) & ((lon_dec > 90) & (lon_dec < 130))) ~ "Soth East Siberia",		
+				((lat_dec < 55) & (lon_dec > 130)) ~ "Soth Far East", 		
+				((lat_dec > 55) & (lon_dec > 130)) ~ "Northern Far East"
+			)
+		)
+	return(res_df)
 }
 
 # @ref_df is the data frame as returned by ReadRefInfo()
@@ -129,23 +223,23 @@ ReadRefData <- function(dir_name, info_df, i_ref_st) {
 		)
 	)
 	data_df <- data_df[!is.na(data_df$year), ]
-	data_df$annual <- sapply(function(i) {mean(as.numeric(data_df[i, -1]))}, 
+	data_df$annual <- sapply(function(i) {sum(as.numeric(data_df[i, -1]))}, 
 		X = seq_along(data_df$year))
 	data_df <- data_df %>% mutate(ann_normal = (annual - mean(annual)) /mean(annual))
 
 	return(data_df)
 }
 
-# read atm indices in KNMI format (https://climexp.knmi.nl/selectindex.cgi?id=someone@somewhere)
-ReadInd <- function(dir_name, file_name, n_skip) {	
-	res_df <- read.table(paste0(dir_name, file_name), 
-							stringsAsFactors = FALSE, header = FALSE,
-							skip = n_skip, na.strings = "-999.9000")
-	colnames(res_df) <- c("year", paste("month", 1:12, sep = "_"))
-	res_df[which(res_df < -900)] <- NA
-	res_df$annual <- rowSums(res_df[, -1])
-	return(res_df)
-}	
+## read atm indices in KNMI format (https://climexp.knmi.nl/selectindex.cgi?id=someone@somewhere)
+# ReadInd <- function(dir_name, file_name, n_skip) {	
+# 	res_df <- read.table(paste0(dir_name, file_name), 
+# 							stringsAsFactors = FALSE, header = FALSE,
+# 							skip = n_skip, na.strings = "-999.9000")
+# 	colnames(res_df) <- c("year", paste("month", 1:12, sep = "_"))
+# 	res_df[which(res_df < -900)] <- NA
+# 	res_df$annual <- rowSums(res_df[, -1])
+# 	return(res_df)
+# }	
 #
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #
@@ -439,4 +533,63 @@ Correl <- function(ref_df, obs_df) {
 	}
 	return(list(correl_value = cor(Q_ref, Q_data), 
 				n_years = length(years_for_cor)))
+}
+
+ConservCheck <- function(meteo_df,
+	slctd_st_id){
+	slctd_st_data <- meteo_df %>% filter(st_id %in% slctd_st_id) %>%
+			filter(!is.na(annual)) %>% 
+			mutate(annual_norm = annual^(1/3)) %>%
+			select(st_id, year, annual, annual_norm)
+		
+		if(length(slctd_st_data$annual_norm) > 1){
+			# kr_res <- kruskal.test(test$annual_norm)
+			# brt_res <- bartlett.test(test$annual_norm)
+			neu_res <- bartels.test(slctd_st_data$annual_norm)
+			snh_res <- snh.test(slctd_st_data$annual_norm)
+			pt_res <- pettitt.test(slctd_st_data$annual_norm)
+			br_res <- br.test(slctd_st_data$annual_norm)
+		} else {
+			neu_res <- NA
+			snh_res <- NA
+			pt_res <- NA 
+			br_res <- NA
+		}
+		
+		p_conserv <- min(neu_res[["p.value"]], snh_res[["p.value"]],
+				pt_res[["p.value"]], br_res[["p.value"]])
+
+		res <- (c(st_id = slctd_st_id,
+			p_neu = neu_res[["p.value"]], p_snh = snh_res[["p.value"]],
+			p_pt = pt_res[["p.value"]], p_br = br_res[["p.value"]],
+			p_min = p_conserv))
+	
+		return(res)
+}
+
+ConstructDataForCorrel <- function(obs_df, atm_df, 
+	year_col = "year", col_to_cogen = "annual") {
+
+	# NB different defaults of tibble and dataframes for @drop
+	# reqire to define @drop explicitly
+	years_for_cor <- unlist(dplyr::intersect(obs_df[, year_col, drop = FALSE], 
+			atm_df[, year_col, drop = FALSE]))
+
+	# not very elegant playing with @drop argument is needed to
+	# overcome difficulties of tibbles vs dataframes
+	atm_data <- unlist(atm_df[which(unlist(atm_df[, year_col]) %in% years_for_cor), 
+			col_to_cogen])
+	param_data <- unlist(obs_df[which(unlist(obs_df[, year_col]) %in% years_for_cor), 
+			col_to_cogen])
+	
+	return(data.frame(year = years_for_cor,
+		atm_ind = atm_data, obs_data = param_data))
+
+}
+# write in a conbinient format under a reasonable file name
+WriteData <- function(dat_df){
+	file_name <- paste0(substitute(dat_df), "_dat.csv")
+	write.table(file = file_name, x = dat_df,
+	quote = FALSE, col.names = TRUE, row.names = FALSE,
+	sep = ";")
 }
